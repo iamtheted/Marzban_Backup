@@ -15,7 +15,7 @@ mkdir backup
 ```
 Download The Script.
 ```bash 
-wget https://raw.githubusercontent.com/M03ED/Marzban_Backup/main/backup.sh
+wget https://raw.githubusercontent.com/iamtheted/Marzban_Backup/main/backup.sh
 ```
 Change Variables If Your File Name Or Location Is Diffrent.
 ```bash
