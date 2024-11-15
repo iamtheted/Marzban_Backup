@@ -5,33 +5,101 @@ DB_NAME="marzban"
 CONTAINER_NAME="mysql"
 BACKUP_DIR="/opt/marzban/backup"
 DOCKER_PATH="/opt/marzban/docker-compose.yml"
-XRAY_CONFIG=$(grep 'XRAY_JSON' $ENV_PATH | cut -d '=' -f2 | tr -d '"')
-DB_PASSWORD=$(grep 'MYSQL_ROOT_PASSWORD' $ENV_PATH | cut -d '=' -f2 | tr -d '"')
-BOT_TOKEN=$(grep 'TELEGRAM_BACKUP_TOKEN' $ENV_PATH | cut -d '=' -f2 | tr -d '"')
-CHAT_ID=$(grep 'TELEGRAM_ADMIN_ID' $ENV_PATH | cut -d '=' -f2 | tr -d '"')
-BACKUP_INTERVAL_TIME=$(grep 'BACKUP_INTERVAL_TIME' $ENV_PATH | cut -d '=' -f2)
+CERTS="/var/lib/marzban/certs"
+TEMPLATES="/var/lib/marzban/templates"
+
+# Extract environment variables
+get_env_var() {
+    grep "$1" "$ENV_PATH" | cut -d '=' -f2 | tr -d '"'
+}
+
+SQLALCHEMY_DATABASE_URL=$(get_env_var 'SQLALCHEMY_DATABASE_URL')
+XRAY_CONFIG=$(get_env_var 'XRAY_JSON')
+BOT_TOKEN=$(get_env_var 'TELEGRAM_BACKUP_TOKEN')
+CHAT_ID=$(get_env_var 'TELEGRAM_ADMIN_ID')
+DISCORD_BACKUP_URL=$(get_env_var 'DISCORD_BACKUP_URL')
+BACKUP_INTERVAL_TIME=$(get_env_var 'BACKUP_INTERVAL_TIME')
 
 # Calculate sleep time in seconds
 SLEEP_TIME=$((BACKUP_INTERVAL_TIME * 60))
 
-# Run backup in a loop
-while true; do
+# Log function for better visibility
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] - $1"
+}
+
+# Function to send a file to Telegram
+send_backup_to_telegram() {
+    echo 
+    echo "Sending Backup To Telegram"
+    local file_path="$1"
+    curl -F chat_id="$CHAT_ID" -F document=@"$file_path" "https://api.telegram.org/bot$BOT_TOKEN/sendDocument"
+}
+
+send_backup_to_discord() {
+    local file_path="$1"
+    local messege = "here is your back up"
+
+    echo 
+    echo 
+    echo "Sending Backup To Discord"
+    curl -X POST -H "Content-Type: multipart/form-data" -F "content=$messege" -F "file=@$file_path" $DISCORD_BACKUP_URL
+
+    echo "Backup successfully sent to Discord"
+}
+
+# Backup function for SQLite
+backup_sqlite() {
+    log "Starting SQLite backup..."
 
     FILE_NAME="$DB_NAME-$(date '+%Y-%m-%d_%H:%M').tar.gz"
-    
-    # Create database backup
-    docker compose -f /opt/marzban/docker-compose.yml exec $CONTAINER_NAME mysqldump -u root -p$DB_PASSWORD $DB_NAME > db_backup.sql
 
-    # Create tar archive with all backup files
-    tar czvf $BACKUP_DIR/$FILE_NAME db_backup.sql $ENV_PATH $DOCKER_PATH $XRAY_CONFIG
+    # Backup SQLite database file
+    cp "$SQLALCHEMY_DATABASE_URL" "$BACKUP_DIR/$DB_NAME.sqlite3"
+
+    # Create a tar archive with all backup files, including the directories
+    tar czvf "$BACKUP_DIR/$FILE_NAME" "$BACKUP_DIR/$DB_NAME.sqlite3" "$ENV_PATH" "$DOCKER_PATH" "$CERTS" "$TEMPLATES"
 
     # Send backup to Telegram bot
-    curl -F chat_id=$CHAT_ID -F document=@"$BACKUP_DIR/$FILE_NAME" https://api.telegram.org/bot$BOT_TOKEN/sendDocument
+    send_backup_to_telegram "$BACKUP_DIR/$FILE_NAME"
+    send_backup_to_discord "$BACKUP_DIR/$FILE_NAME"
 
-    # Delete backup files
-    rm db_backup.sql
-    rm $BACKUP_DIR/$FILE_NAME
+    # Cleanup
+    rm "$BACKUP_DIR/$DB_NAME.sqlite3"
+    rm "$BACKUP_DIR/$FILE_NAME"
 
-    # Sleep for specified interval
-    sleep $SLEEP_TIME
+    log "SQLite backup completed!"
+}
+
+# Backup function for MySQL
+backup_mysql() {
+    log "Starting MySQL backup..."
+
+    FILE_NAME="$DB_NAME-$(date '+%Y-%m-%d_%H:%M').tar.gz"
+
+    # Create MySQL database backup
+    docker compose -f "$DOCKER_PATH" exec "$CONTAINER_NAME" mysqldump -u root -p"$DB_PASSWORD" "$DB_NAME" > "$BACKUP_DIR/db_backup.sql"
+
+    # Create tar archive with all backup files, including the directories
+    tar czvf "$BACKUP_DIR/$FILE_NAME" "$BACKUP_DIR/db_backup.sql" "$ENV_PATH" "$DOCKER_PATH" "$CERTS" "$TEMPLATES"
+
+    # Send backup to Telegram bot
+    send_backup_to_telegram "$BACKUP_DIR/$FILE_NAME"
+    send_backup_to_discord "$BACKUP_DIR/$FILE_NAME"
+    rm "$BACKUP_DIR/$FILE_NAME"
+
+    log "MySQL backup completed!"
+}
+
+# Main loop
+while true; do
+    if [[ $SQLALCHEMY_DATABASE_URL == sqlite* ]]; then
+        backup_sqlite
+    else
+        DB_PASSWORD=$(get_env_var 'MYSQL_ROOT_PASSWORD')
+        backup_mysql
+    fi
+
+    log "Sleeping for $SLEEP_TIME seconds..."
+    sleep "$SLEEP_TIME"
 done
